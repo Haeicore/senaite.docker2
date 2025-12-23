@@ -56,7 +56,30 @@ class Environment(object):
 
         with open(self.zope_conf, "w") as cfile:
             cfile.write(config)
+    
 
+    def set_zeo_port(self):
+        """Set zeoserver port (zeo.conf)"""
+        zeo_port = self.env.get("ZEO_PORT", "").strip()
+        if not zeo_port:
+            return
+
+        if not os.path.exists(self.zeoserver_conf):
+            return
+
+        with open(self.zeoserver_conf, "r") as f:
+            text = f.read()
+
+        # zeo.conf costuma ter "address 8080" ou "address 0.0.0.0:8080"
+        text_new = re.sub(r'(^\s*address\s+)\d+\s*$', r'\g<1>%s' % zeo_port, text, flags=re.M)
+        text_new = re.sub(r'(^\s*address\s+0\.0\.0\.0:)\d+\s*$', r'\g<1>%s' % zeo_port, text_new, flags=re.M)
+        text_new = re.sub(r'(^\s*address\s+\[::\]:)\d+\s*$', r'\g<1>%s' % zeo_port, text_new, flags=re.M)
+
+        if text_new != text:
+            with open(self.zeoserver_conf, "w") as f:
+                f.write(text_new)
+
+    
     def zeopack(self):
         """ ZEO Pack
         """
@@ -67,7 +90,7 @@ class Environment(object):
         if ":" in server:
             host, port = server.split(":")
         else:
-            host, port = (server, "8100")
+            host, port = (server, "8080")
 
         with open(self.zeopack_conf, 'r') as cfile:
             text = cfile.read()
@@ -194,6 +217,8 @@ class Environment(object):
         self.zeoclient()
         self.zeopack()
         self.zeoserver()
+        self.set_zeo_port()
+        self.set_http_port()
 
     __call__ = setup
 
