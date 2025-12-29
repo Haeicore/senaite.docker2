@@ -1,72 +1,52 @@
-# Use an official Python runtime as a parent image
-FROM python:2.7-slim-buster
+# Plone 6 + Python 3.11 em Debian estável (recomendado)
+FROM python:3.11-slim-bookworm
 
-# Set one or more individual labels
-LABEL maintainer="Ramon Bartl"
-LABEL email="rb@ridingbytes.com"
-LABEL senaite.core.version="latest"
+LABEL maintainer="Thiago Haeitmann"
+LABEL email="ceo@haeicore.com.br"
 
-# Set environment variables
-ENV PLONE_MAJOR=5.2 \
-    PLONE_VERSION=5.2.15 \
-    PLONE_MD5=714be71e21098ab148df8681196e78ce \
-    PLONE_UNIFIED_INSTALLER=Plone-5.2.15-UnifiedInstaller-1.0 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/Sao_Paulo \
+    PLONE_VERSION=6.0.7 \
     SENAITE_HOME=/home/senaite \
     SENAITE_USER=senaite \
-    SENAITE_INSTANCE_HOME=/home/senaite/senaitelims \
     SENAITE_DATA=/data \
-    SENAITE_FILESTORAGE=/data/filestorage \
-    SENAITE_BLOBSTORAGE=/data/blobstorage
+    INSTANCE_DIR=/data/instance \
+    HTTP_PORT=8080 \
+    ADMIN_USER=admin \
+    ADMIN_PASSWORD=admin
 
-# Create the senaite user
-RUN useradd --system -m -d $SENAITE_HOME -U -u 500 $SENAITE_USER
-
-# Create directories
-RUN mkdir -p $SENAITE_INSTANCE_HOME $SENAITE_FILESTORAGE $SENAITE_BLOBSTORAGE
-
-# Copy Buildout
-COPY requirements.txt buildout.cfg $SENAITE_INSTANCE_HOME/
-
-# Copy the build dependencies and startup scripts
-COPY build_deps.txt run_deps.txt docker-initialize.py docker-entrypoint.sh /
-
-# Note: we concatenate all commands to avoid multiple layer generation and reduce the image size
-RUN echo "Acquire::Check-Valid-Until \"false\";" > /etc/apt/apt.conf.d/99no-check-valid-until && \
-    sed -i 's|http://deb.debian.org|http://archive.debian.org|g' /etc/apt/sources.list && \
-    sed -i 's|http://security.debian.org|http://archive.debian.org|g' /etc/apt/sources.list && \
-    sed -i '/stretch-updates/d' /etc/apt/sources.list && \
-    sed -i '/buster-updates/d' /etc/apt/sources.list && \
-    apt-get update \
-    # Install system packages
-    && apt-get install -y --no-install-recommends $(grep -vE "^\s*#" /build_deps.txt | tr "\n" " ") \
-    && apt-get install -y --no-install-recommends $(grep -vE "^\s*#" /run_deps.txt | tr "\n" " ") \
-    # Fetch unified installer
-    && wget -O Plone.tgz https://launchpad.net/plone/$PLONE_MAJOR/$PLONE_VERSION/+download/$PLONE_UNIFIED_INSTALLER.tgz \
-    && echo "$PLONE_MD5 Plone.tgz" | md5sum -c - \
-    && tar -xzf /Plone.tgz \
-    && cp -rv $PLONE_UNIFIED_INSTALLER/base_skeleton/* $SENAITE_INSTANCE_HOME \
-    && cp -v $PLONE_UNIFIED_INSTALLER/buildout_templates/buildout.cfg $SENAITE_INSTANCE_HOME/buildout-base.cfg \
-    && rm -rf $PLONE_UNIFIED_INSTALLER Plone.tgz \
-    # Buildout
-    && cd $SENAITE_INSTANCE_HOME \
-    && pip install -r requirements.txt \
-    && buildout \
-    && ln -s $SENAITE_FILESTORAGE/ var/filestorage \
-    && ln -s $SENAITE_BLOBSTORAGE/ var/blobstorage \
-    && chown -R senaite:senaite $SENAITE_HOME $SENAITE_DATA \
-    # Cleanup
-    && apt-get purge -y --auto-remove $(grep -vE "^\s*#" /build_deps.txt  | tr "\n" " ") \
-    && rm -rf /$SENAITE_HOME/buildout-cache \
+# Dependências nativas comuns pro Plone/Zope/Pillow/lxml/WeasyPrint etc.
+# (Se faltar algo, adiciona aqui — mas isso já cobre 90% dos casos)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget git \
+      build-essential \
+      libssl-dev libffi-dev \
+      zlib1g-dev libjpeg62-turbo-dev libpng-dev \
+      libxml2-dev libxslt1-dev \
+      libpq-dev \
+      locales \
     && rm -rf /var/lib/apt/lists/*
 
-# Change working directory
-WORKDIR $SENAITE_INSTANCE_HOME
+# Usuário não-root
+RUN useradd --system -m -d ${SENAITE_HOME} -U -u 500 ${SENAITE_USER} \
+    && mkdir -p ${SENAITE_DATA} \
+    && chown -R ${SENAITE_USER}:${SENAITE_USER} ${SENAITE_HOME} ${SENAITE_DATA}
 
-# Mount external volume
-VOLUME /data
+# pip sane (sem inventar moda, mas também sem deixar velho demais)
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Expose instance port
+# Instala Plone 6.0.7 via pip (caminho moderno)
+# Isso traz Zope/Werkzeug/Waitress/etc conforme o stack do Plone.
+RUN python -m pip install --no-cache-dir "Plone==${PLONE_VERSION}"
+
+# Entry point
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh \
+    && chown ${SENAITE_USER}:${SENAITE_USER} /docker-entrypoint.sh
+
+VOLUME ["/data"]
 EXPOSE 8080
+USER ${SENAITE_USER}
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["start"]
