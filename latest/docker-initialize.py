@@ -1,343 +1,129 @@
-#!/usr/local/bin/python
-
-import re
+#!/usr/bin/env python3
 import os
+import re
+import subprocess
+from pathlib import Path
 
+ZEO_CONF = Path("/home/senaite/senaitelims/parts/zeoserver/etc/zeo.conf")
+ZOPE_CONF = Path("/home/senaite/senaitelims/parts/instance/etc/zope.conf")
 
-class Environment(object):
-    """ Configure container via environment variables
-    """
-    def __init__(
-        self, env=os.environ,
-        zope_conf="/home/senaite/senaitelims/parts/instance/etc/zope.conf",
-        custom_conf="/home/senaite/senaitelims/custom.cfg",
-        zeopack_conf="/home/senaite/senaitelims/bin/zeopack",
-        zeoserver_conf="/home/senaite/senaitelims/parts/zeoserver/etc/zeo.conf",
-        cors_conf="/home/senaite/senaitelims/parts/instance/etc/package-includes/999-additional-overrides.zcml"
-    ):
-        self.env = env
-        self.zope_conf = zope_conf
-        self.custom_conf = custom_conf
-        self.zeopack_conf = zeopack_conf
-        self.zeoserver_conf = zeoserver_conf
-        self.cors_conf = cors_conf
+DATA_FS = Path("/data/filestorage/Data.fs")
+BLOB_DIR = Path("/data/blobstorage")
 
-    def zeoclient(self):
-        """ ZEO Client
-        """
-        server = self.env.get("ZEO_ADDRESS", None)
-        if not server:
-            return
+BIN_INSTANCE = Path("/home/senaite/senaitelims/bin/instance")
 
-        config = ""
-        with open(self.zope_conf, "r") as cfile:
-            config = cfile.read()
+def env(name, default=None):
+    v = os.environ.get(name)
+    return v if (v is not None and v != "") else default
 
-        # Already initialized
-        if "<blobstorage>" not in config:
-            return
-
-        read_only = self.env.get("ZEO_READ_ONLY", "false")
-        zeo_ro_fallback = self.env.get("ZEO_CLIENT_READ_ONLY_FALLBACK", "false")
-        shared_blob_dir = self.env.get("ZEO_SHARED_BLOB_DIR", "off")
-        zeo_storage = self.env.get("ZEO_STORAGE", "1")
-        zeo_client_cache_size = self.env.get("ZEO_CLIENT_CACHE_SIZE", "128MB")
-        zeo_conf = ZEO_TEMPLATE.format(
-            zeo_address=server,
-            read_only=read_only,
-            zeo_client_read_only_fallback=zeo_ro_fallback,
-            shared_blob_dir=shared_blob_dir,
-            zeo_storage=zeo_storage,
-            zeo_client_cache_size=zeo_client_cache_size
-        )
-
-        pattern = re.compile(r"<blobstorage>.+</blobstorage>", re.DOTALL)
-        config = re.sub(pattern, zeo_conf, config)
-
-        with open(self.zope_conf, "w") as cfile:
-            cfile.write(config)
-    
-
-    def set_zeo_port(self):
-        """Set zeoserver port (zeo.conf)"""
-        zeo_port = self.env.get("ZEO_PORT", "").strip()
-        if not zeo_port:
-            return
-    
-        if not os.path.exists(self.zeoserver_conf):
-            return
-    
-        with open(self.zeoserver_conf, "r") as f:
-            text = f.read()
-    
-        text_new = text
-        # aceita:
-        # address 8080
-        # address 0.0.0.0:8080
-        # address [::]:8080
-        text_new = re.sub(r'(^\s*address\s+)\d+\s*$', r'\g<1>%s' % zeo_port, text_new, flags=re.M)
-        text_new = re.sub(r'(^\s*address\s+0\.0\.0\.0:)\d+\s*$', r'\g<1>%s' % zeo_port, text_new, flags=re.M)
-        text_new = re.sub(r'(^\s*address\s+\[::\]:)\d+\s*$', r'\g<1>%s' % zeo_port, text_new, flags=re.M)
-    
-        if text_new != text:
-            with open(self.zeoserver_conf, "w") as f:
-                f.write(text_new)
-    
-    
-    def set_http_port(self):
-        """Set instance HTTP port (zope.conf)"""
-        http_port = self.env.get("HTTP_PORT", "").strip()
-        if not http_port:
-            return
-    
-        if not os.path.exists(self.zope_conf):
-            return
-    
-        with open(self.zope_conf, "r") as f:
-            text = f.read()
-    
-        text_new = text
-    
-        # pega:
-        # http-address 8080
-        # http-address = 8080
-        # http-address 0.0.0.0:8080
-        # http-address = 0.0.0.0:8080
-        text_new = re.sub(
-            r'(^\s*http-address\s*=?\s*)(?:([0-9a-fA-F\.\:\[\]]+):)?(\d+)\s*$',
-            lambda m: m.group(1) + ((m.group(2) + ":") if m.group(2) else "") + http_port,
-            text_new,
-            flags=re.M
-        )
-    
-        # alguns templates usam "address" em vez de "http-address"
-        text_new = re.sub(
-            r'(^\s*address\s*=?\s*)(?:([0-9a-fA-F\.\:\[\]]+):)?(\d+)\s*$',
-            lambda m: m.group(1) + ((m.group(2) + ":") if m.group(2) else "") + http_port,
-            text_new,
-            flags=re.M
-        )
-    
-        if text_new != text:
-            with open(self.zope_conf, "w") as f:
-                f.write(text_new)
-
-
-    
-    def zeopack(self):
-        """ ZEO Pack
-        """
-        server = self.env.get("ZEO_ADDRESS", None)
-        if not server:
-            return
-
-        if ":" in server:
-            host, port = server.split(":")
+def replace_or_add(conf_path: Path, key_regex: str, new_line: str):
+    if not conf_path.exists():
+        print(f"[init] WARN: config not found: {conf_path}")
+        return
+    s = conf_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    rx = re.compile(key_regex)
+    out = []
+    replaced = False
+    for line in s:
+        if rx.match(line.strip()):
+            out.append(new_line)
+            replaced = True
         else:
-            host, port = (server, "8080")
+            out.append(line)
+    if not replaced:
+        out.append(new_line)
+    conf_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
-        with open(self.zeopack_conf, 'r') as cfile:
-            text = cfile.read()
-            text = text.replace('address = "8100"', 'address = "%s"' % server)
-            text = text.replace('host = "127.0.0.1"', 'host = "%s"' % host)
-            text = text.replace('port = "8100"', 'port = "%s"' % port)
+def run(cmd, check=True):
+    print("[init] RUN:", " ".join(cmd))
+    return subprocess.run(cmd, check=check)
 
-        with open(self.zeopack_conf, 'w') as cfile:
-            cfile.write(text)
+def ensure_dirs():
+    Path("/data/filestorage").mkdir(parents=True, exist_ok=True)
+    Path("/data/blobstorage").mkdir(parents=True, exist_ok=True)
+    Path("/data/log").mkdir(parents=True, exist_ok=True)
+    Path("/data/cache").mkdir(parents=True, exist_ok=True)
 
-    def zeoserver(self):
-        """ ZEO Server
-        """
-        pack_keep_old = self.env.get("ZEO_PACK_KEEP_OLD", '')
-        if pack_keep_old.lower() in ("false", "no", "0", "n", "f"):
-            with open(self.zeoserver_conf, 'r') as cfile:
-                text = cfile.read()
-                if 'pack-keep-old' not in text:
-                    text = text.replace(
-                        '</filestorage>',
-                        '  pack-keep-old false\n</filestorage>'
-                    )
+def configure_ports():
+    http_port = env("HTTP_PORT", "8080")
+    zeo_port = env("ZEO_PORT", "8100")
+    zeo_bind = env("ZEO_BIND", "0.0.0.0")
+    http_bind = env("HTTP_BIND", "0.0.0.0")
 
-            with open(self.zeoserver_conf, 'w') as cfile:
-                cfile.write(text)
+    # ZEO conf: address
+    # zeo.conf costuma ter "address 0.0.0.0:8100" ou similar
+    replace_or_add(
+        ZEO_CONF,
+        r"^address\s+.*$",
+        f"address {zeo_bind}:{zeo_port}",
+    )
 
-    def cors(self):
-        """ Configure CORS Policies
-        """
-        if not [e for e in self.env if e.startswith("CORS_")]:
-            return
+    # Zope conf: http-address
+    replace_or_add(
+        ZOPE_CONF,
+        r"^http-address\s+.*$",
+        f"http-address {http_bind}:{http_port}",
+    )
 
-        allow_origin = self.env.get("CORS_ALLOW_ORIGIN",
-            "http://localhost:3000,http://127.0.0.1:3000")
-        allow_methods = self.env.get("CORS_ALLOW_METHODS",
-            "DELETE,GET,OPTIONS,PATCH,POST,PUT")
-        allow_credentials = self.env.get("CORS_ALLOW_CREDENTIALS", "true")
-        expose_headers = self.env.get("CORS_EXPOSE_HEADERS",
-            "Content-Length,X-My-Header")
-        allow_headers = self.env.get("CORS_ALLOW_HEADERS",
-            "Accept,Authorization,Content-Type,X-Custom-Header")
-        max_age = self.env.get("CORS_MAX_AGE", "3600")
-        cors_conf = CORS_TEMPLACE.format(
-            allow_origin=allow_origin,
-            allow_methods=allow_methods,
-            allow_credentials=allow_credentials,
-            expose_headers=expose_headers,
-            allow_headers=allow_headers,
-            max_age=max_age
-        )
-        with open(self.cors_conf, "w") as cfile:
-            cfile.write(cors_conf)
+    # Zope conf: zeo-address
+    # para host networking, 127.0.0.1 é OK (zeo e web no mesmo host)
+    replace_or_add(
+        ZOPE_CONF,
+        r"^zeo-address\s+.*$",
+        f"zeo-address 127.0.0.1:{zeo_port}",
+    )
 
-    def buildout(self):
-        """ Buildout from environment variables
-        """
-        # Already configured
-        if os.path.exists(self.custom_conf):
-            return
+def is_first_run():
+    # Se não existe Data.fs, é primeira inicialização
+    return not DATA_FS.exists()
 
-        findlinks = self.env.get("FIND_LINKS", "").strip().split()
+def create_site_and_apply_profile():
+    site_id = env("PLONE_SITE", "Plone")
+    admin_user = env("ADMIN_USER", "admin")
+    admin_pass = env("ADMIN_PASSWORD", env("PASSWORD", "admin"))
 
-        eggs = self.env.get("PLONE_ADDONS",
-                            self.env.get("ADDONS", "")).strip().split()
+    # 1) Garante user admin (zope2instance usa adduser via script instance)
+    # Isso cria/atualiza o user no emergency user database
+    run([str(BIN_INSTANCE), "adduser", admin_user, admin_pass])
 
-        zcml = self.env.get("PLONE_ZCML",
-                            self.env.get("ZCML", "")).strip().split()
+    # 2) Cria site Plone (Classic)
+    # create-site existe no bin/instance do zope2instance
+    run([str(BIN_INSTANCE), "create-site", site_id, "--admin-user", admin_user])
 
-        develop = self.env.get("PLONE_DEVELOP",
-                               self.env.get("DEVELOP", "")).strip().split()
+    # 3) Aplica profile do SENAITE (GenericSetup)
+    # Roda um snippet via "run" dentro do Zope
+    profile = env("PROFILE", "senaite.lims:default")
 
-        site = self.env.get("PLONE_SITE",
-                            self.env.get("SITE", "")).strip()
+    script = f"""
+from Testing.makerequest import makerequest
+from zope.component.hooks import setSite
+import transaction
 
-        profiles = self.env.get("PLONE_PROFILES",
-                                self.env.get("PROFILES", "")).strip().split()
+app = makerequest(app)
+site = app.get('{site_id}')
+setSite(site)
 
-        versions = self.env.get("PLONE_VERSIONS",
-                                self.env.get("VERSIONS", "")).strip().split()
+from Products.CMFCore.utils import getToolByName
+setup = getToolByName(site, 'portal_setup')
+setup.runAllImportStepsFromProfile('profile-{profile}')
 
-        sources = self.env.get("SOURCES", "").strip().split(",")
-
-        password = self.env.get("PASSWORD", "").strip()
-
-        # If profiles not provided. Install ADDONS :default profiles
-        if not profiles:
-            for egg in eggs:
-                base = egg.split("=")[0]
-                profiles.append("%s:default" % base)
-
-        if not (eggs or zcml or develop or site or password):
-            return
-
-        buildout = BUILDOUT_TEMPLATE.format(
-            password=password or "admin",
-            findlinks="\n\t".join(findlinks),
-            eggs="\n\t".join(eggs),
-            zcml="\n\t".join(zcml),
-            develop="\n\t".join(develop),
-            versions="\n".join(versions),
-            sources="\n".join(sources),
-        )
-
-        if site:
-            buildout += PLONESITE_TEMPLATE.format(
-                site=site,
-                profiles="\n\t".join(profiles),
-            )
-
-        # If we need to create a senaitesite and we have a zeo setup
-        # configure collective.recipe.senaitesite properly
-        server = self.env.get("ZEO_ADDRESS", None)
-        if server:
-            buildout += ZEO_INSTANCE_TEMPLATE.format(
-                zeoaddress=server,
-            )
-
-        with open(self.custom_conf, 'w') as cfile:
-            cfile.write(buildout)
-
-    def setup(self, **kwargs):
-        self.buildout()
-        self.cors()
-        self.zeoclient()
-        self.zeopack()
-        self.zeoserver()
-        self.set_zeo_port()
-        self.set_http_port()
-
-    __call__ = setup
-
-
-ZEO_TEMPLATE = """
-    <zeoclient>
-      read-only {read_only}
-      read-only-fallback {zeo_client_read_only_fallback}
-      blob-dir /data/blobstorage
-      shared-blob-dir {shared_blob_dir}
-      server {zeo_address}
-      storage {zeo_storage}
-      name zeostorage
-      var /home/senaite/senaitelims/parts/instance/var
-      cache-size {zeo_client_cache_size}
-    </zeoclient>
-""".strip()
-
-CORS_TEMPLACE = """<configure
-  xmlns="http://namespaces.zope.org/zope">
-  <configure
-    xmlns="http://namespaces.zope.org/zope"
-    xmlns:plone="http://namespaces.plone.org/plone">
-    <plone:CORSPolicy
-      allow_origin="{allow_origin}"
-      allow_methods="{allow_methods}"
-      allow_credentials="{allow_credentials}"
-      expose_headers="{expose_headers}"
-      allow_headers="{allow_headers}"
-      max_age="{max_age}"
-     />
-  </configure>
-</configure>
+transaction.commit()
+print("OK: applied profile {profile} on {site_id}")
 """
 
-BUILDOUT_TEMPLATE = """
-[buildout]
-extends = buildout.cfg
-user=admin:{password}
-find-links += {findlinks}
-develop += {develop}
-eggs += {eggs}
-zcml += {zcml}
+    run([str(BIN_INSTANCE), "run", "-c", script])
 
-[versions]
-{versions}
+def main():
+    print("[init] start docker-initialize.py")
+    ensure_dirs()
+    configure_ports()
 
-[sources]
-{sources}
-"""
-
-PLONESITE_TEMPLATE = """
-
-[plonesite]
-enabled = true
-site-id = {site}
-profiles += {profiles}
-"""
-
-ZEO_INSTANCE_TEMPLATE = """
-
-[instance]
-zeo-client = true
-zeo-address = {zeoaddress}
-shared-blob = off
-http-fast-listen = off
-"""
-
-
-def initialize():
-    """ Configure Instance as ZEO Client
-    """
-    environment = Environment()
-    environment.setup()
-
+    # Só cria site na primeira vez
+    if is_first_run():
+        print("[init] First run detected (no Data.fs). Creating site...")
+        create_site_and_apply_profile()
+    else:
+        print("[init] Existing Data.fs found. Skipping site creation.")
 
 if __name__ == "__main__":
-    initialize()
+    main()
