@@ -1,55 +1,33 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-COMMANDS="adduser debug fg foreground help kill logreopen logtail reopen_transcript run show status stop wait"
-START="console start restart"
+# Defaults (ajusta via HCL)
+: "${HTTP_PORT:=8080}"
+: "${INSTANCE_DIR:=/data/instance}"
+: "${ADMIN_USER:=admin}"
+: "${ADMIN_PASSWORD:=admin}"
 
-# Fixing permissions for external /data volumes
-mkdir -p /data/blobstorage /data/cache /data/filestorage /data/instance /data/log /data/zeoserver
-mkdir -p /home/senaite/senaitelims/src
-find /data  -not -user senaite -exec chown senaite:senaite {} \+
-find /home/senaite -not -user senaite -exec chown senaite:senaite {} \+
+# Diretórios comuns
+mkdir -p /data/blobstorage /data/filestorage /data/cache /data/log "$INSTANCE_DIR"
 
+# Permissões (rodar como root no container facilita; se for non-root, isso muda)
+# Se você estiver usando USER senaite no Dockerfile, remova esses chown ou rode container com permissão.
+chown -R senaite:senaite /data || true
 
-# Initializing from environment variables
-gosu senaite python /docker-initialize.py
-
-function git_fixture {
-  for d in `find /home/senaite/senaitelims/src -mindepth 1 -maxdepth 1 -type d`
-  do
-    if [ -d "$d/.git" ]; then
-      git config --global --add safe.directory $d
-      echo "git config --global --add safe.directory $d"
-    fi
-  done
-}
-
-# Fix mr.developer: fatal: detected dubious ownership in repository at ...
-# https://github.com/actions/runner-images/issues/6775
-# https://github.com/senaite/senaite.docker/issues/17
-git_fixture
-
-if [ -e "custom.cfg" ]; then
-  buildout -c custom.cfg
-  find /data  -not -user senaite -exec chown senaite:senaite {} \+
-  find /home/senaite -not -user senaite -exec chown senaite:senaite {} \+
-  gosu senaite python /docker-initialize.py
+# Cria instância se não existir
+if [ ! -f "$INSTANCE_DIR/etc/zope.conf" ]; then
+  echo "[init] Creating WSGI instance at $INSTANCE_DIR"
+  su -s /bin/bash -c "mkwsgiinstance -d '$INSTANCE_DIR' -u '${ADMIN_USER}:${ADMIN_PASSWORD}'" senaite
 fi
 
-# ZEO Server
-if [[ "$1" == "zeo"* ]]; then
-  exec gosu senaite bin/$1 fg
+# Ajusta porta no zope.conf
+CONF="$INSTANCE_DIR/etc/zope.conf"
+if grep -qE '^\s*http-address' "$CONF"; then
+  sed -i -E "s#^(\s*http-address\s+)([0-9a-fA-F\.\:\[\]]+:)?([0-9]+)\s*\$#\1\2${HTTP_PORT}#g" "$CONF"
+else
+  echo "http-address 0.0.0.0:${HTTP_PORT}" >> "$CONF"
 fi
 
-# Instance start
-if [[ $START == *"$1"* ]]; then
-  exec gosu senaite bin/instance console
-fi
-
-# Instance helpers
-if [[ $COMMANDS == *"$1"* ]]; then
-  exec gosu senaite bin/instance "$@"
-fi
-
-# Custom
-exec "$@"
+# Start
+echo "[run] Starting Plone (WSGI) on ${HTTP_PORT}"
+exec su -s /bin/bash -c "$INSTANCE_DIR/bin/runwsgi -v $CONF" senaite
