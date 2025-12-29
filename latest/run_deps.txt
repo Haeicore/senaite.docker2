@@ -7,7 +7,7 @@ libjpeg62-turbo
 libopenjp2-7
 libpango-1.0-0
 libpangocairo-1.0-0
-libtiff5
+libtiff6
 libxml2
 libxslt1.1
 
