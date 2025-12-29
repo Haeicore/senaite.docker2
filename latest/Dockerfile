@@ -33,7 +33,8 @@ RUN useradd --system -m -d ${SENAITE_HOME} -U -u 500 ${SENAITE_USER} \
     && chown -R ${SENAITE_USER}:${SENAITE_USER} ${SENAITE_HOME} ${SENAITE_DATA}
 
 # pip sane (sem inventar moda, mas também sem deixar velho demais)
-RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir \
+  "pip==23.2" "setuptools==68.0.0" "wheel==0.40.0"
 
 # Instala Plone 6.0.7 via pip (caminho moderno)
 # Isso traz Zope/Werkzeug/Waitress/etc conforme o stack do Plone.
