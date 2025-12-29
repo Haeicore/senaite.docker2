@@ -1,53 +1,50 @@
-# Plone 6 + Python 3.11 em Debian estável (recomendado)
 FROM python:3.11-slim-bookworm
 
 LABEL maintainer="Thiago Haeitmann"
 LABEL email="ceo@haeicore.com.br"
+LABEL stack="plone6-classic-buildout"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=America/Sao_Paulo \
-    PLONE_VERSION=6.0.7 \
     SENAITE_HOME=/home/senaite \
-    SENAITE_USER=senaite \
-    SENAITE_DATA=/data \
-    INSTANCE_DIR=/data/instance \
-    HTTP_PORT=8080 \
-    ADMIN_USER=admin \
-    ADMIN_PASSWORD=admin
+    SENAITE_INSTANCE_HOME=/home/senaite/senaitelims \
+    SENAITE_DATA=/data
 
-# Dependências nativas comuns pro Plone/Zope/Pillow/lxml/WeasyPrint etc.
-# (Se faltar algo, adiciona aqui — mas isso já cobre 90% dos casos)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget git \
-      build-essential \
-      libssl-dev libffi-dev \
-      zlib1g-dev libjpeg62-turbo-dev libpng-dev \
-      libxml2-dev libxslt1-dev \
-      libpq-dev \
-      locales \
-    && rm -rf /var/lib/apt/lists/*
+# Usuário
+RUN useradd --system -m -d $SENAITE_HOME -U -u 500 senaite
 
-# Usuário não-root
-RUN useradd --system -m -d ${SENAITE_HOME} -U -u 500 ${SENAITE_USER} \
-    && mkdir -p ${SENAITE_DATA} \
-    && chown -R ${SENAITE_USER}:${SENAITE_USER} ${SENAITE_HOME} ${SENAITE_DATA}
+# Diretórios base
+RUN mkdir -p \
+    $SENAITE_INSTANCE_HOME \
+    $SENAITE_DATA/blobstorage \
+    $SENAITE_DATA/filestorage \
+    $SENAITE_DATA/cache \
+    $SENAITE_DATA/log \
+    $SENAITE_DATA/zeoserver
 
-# pip sane (sem inventar moda, mas também sem deixar velho demais)
-RUN python -m pip install --no-cache-dir \
-  "pip==23.2" "setuptools==68.0.0" "wheel==0.40.0"
+# Dependências do SO
+COPY build_deps.txt run_deps.txt /
 
-# Instala Plone 6.0.7 via pip (caminho moderno)
-# Isso traz Zope/Werkzeug/Waitress/etc conforme o stack do Plone.
-RUN python -m pip install --no-cache-dir "Plone==${PLONE_VERSION}"
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      $(grep -vE "^\s*#" /build_deps.txt | tr "\n" " ") \
+      $(grep -vE "^\s*#" /run_deps.txt | tr "\n" " ") && \
+    rm -rf /var/lib/apt/lists/*
 
-# Entry point
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh \
-    && chown ${SENAITE_USER}:${SENAITE_USER} /docker-entrypoint.sh
+# Buildout
+WORKDIR $SENAITE_INSTANCE_HOME
+COPY requirements.txt buildout.cfg ./
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    buildout
+
+# Scripts
+COPY docker-initialize.py docker-entrypoint.sh /
+RUN chmod +x /docker-entrypoint.sh && \
+    chown -R senaite:senaite /home/senaite /data
 
 VOLUME ["/data"]
-EXPOSE 8080
-USER ${SENAITE_USER}
+
+EXPOSE 8080 8100
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["start"]
